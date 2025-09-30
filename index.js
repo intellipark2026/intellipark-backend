@@ -20,10 +20,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 // ✅ Enable CORS for your Firebase Hosting domain
-app.use(cors({
-  origin: "https://intellipark2025-327e9.web.app"
-}));
-
+app.use(cors());
 app.use(bodyParser.json());
 
 const XENDIT_API_KEY = process.env.XENDIT_API_KEY || "xnd_development_pPITsOGqqgRCupBylYT10cs6XrPdqLvrihSv8ENoyup3WaHjeh7UalFISZl5v";
