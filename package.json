@@ -1,0 +1,16 @@
+{
+  "name": "intellipark-backend",
+  "version": "1.0.0",
+  "description": "Backend server for IntelliPark reservation and Xendit integration",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.5.0",
+    "node-fetch": "^2.7.0"
+  }
+}
