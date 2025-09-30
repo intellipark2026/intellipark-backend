@@ -17,7 +17,9 @@ try { require("dotenv").config(); } catch (_) {}
 const app = express();
 
 // Keep body small and fast; JSON for API routes
-app.use(cors());
+app.use(cors({
+  origin: "https://intellipark2025-327e9.web.app"
+}));
 app.use(express.json({ type: "*/*", limit: "1mb" }));
 
 // ---------- Firebase Admin ----------
