@@ -1,90 +1,103 @@
+// index.js
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
-const QRCode = require("qrcode");
+const fetch = require("node-fetch");
+
+// Load environment variables from .env
 require("dotenv").config();
 
-const serviceAccount = require("./serviceAccountKey.json");
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: process.env.FIREBASE_DATABASE_URL
-});
-
-const db = admin.database();
 const app = express();
-
-app.use(cors());
+app.use(cors({
+  origin: [
+    "http://localhost:5500",  // for local dev
+    "https://intellipark2025-327e9.web.app" // your Firebase frontend
+  ]
+}));
 app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 8080;
+// Firebase Admin setup
+const serviceAccount = require("./serviceAccountKey.json");
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://intellipark2025-327e9-default-rtdb.firebaseio.com"
+});
+const db = admin.database();
 
-// Test route
+// Health check
 app.get("/", (req, res) => {
-  res.send("✅ IntelliPark backend running!");
+  res.send("✅ IntelliPark backend running");
 });
 
-// Create invoice (simplified version)
+// Create invoice
 app.post("/api/create-invoice", async (req, res) => {
   try {
-    const { slot, name, plate, vehicle, email, time } = req.body;
+    const { name, email, plate, vehicle, time, slot } = req.body;
+    const timestamp = new Date().toISOString();
 
-    if (!slot || !email) {
-      return res.status(400).json({ error: "Missing required fields" });
+    // 1. Call Xendit API to generate invoice
+    const response = await fetch("https://api.xendit.co/v2/invoices", {
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + Buffer.from(process.env.XENDIT_SECRET_KEY + ":").toString("base64"),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        external_id: `resv-${Date.now()}`,
+        amount: 50,
+        currency: "PHP",
+        description: `Reservation for ${slot}`,
+        payer_email: email,
+        success_redirect_url: `https://intellipark2025-327e9.web.app/confirmation.html?slot=${slot}&name=${encodeURIComponent(name)}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}&time=${time}&timestamp=${encodeURIComponent(timestamp)}&email=${encodeURIComponent(email)}`
+      })
+    });
+
+    const invoice = await response.json();
+    if (invoice.error_code) {
+      return res.status(400).json(invoice);
     }
 
-    // Simulate invoice creation (replace with real Xendit call)
-    res.json({
-      invoice_url: "https://checkout.xendit.co/web/1234567890",
-      slot,
-      name,
-      plate,
-      vehicle,
-      email,
-      time
-    });
-  } catch (error) {
-    console.error("Error creating invoice:", error);
-    res.status(500).json({ error: "Internal server error" });
+    res.json(invoice);
+  } catch (err) {
+    console.error("❌ Error creating invoice:", err);
+    res.status(500).json({ error: "Failed to create invoice" });
   }
 });
 
-// Confirm payment and save reservation
-app.post("/api/confirm-payment", async (req, res) => {
+// Webhook for payment confirmation
+app.post("/api/xendit-webhook", async (req, res) => {
   try {
-    const { slot, name, plate, vehicle, email, time } = req.body;
+    const event = req.body;
+    console.log("🔔 Webhook received:", event);
 
-    if (!slot || !email) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (event.status === "PAID") {
+      const metadata = event.external_id; // resv-xxxxx
+      const slot = event.description.split(" ")[2]; // extract slot
+
+      // Update Firebase
+      await db.ref(`/reservations/${slot}`).set({
+        name: event.payer_name || "Unknown",
+        email: event.payer_email,
+        plate: "N/A",
+        vehicle: "N/A",
+        time: new Date().toLocaleTimeString(),
+        timestamp: new Date().toISOString(),
+        status: "Paid"
+      });
+
+      await db.ref(`/${slot}`).update({ status: "Reserved", reserved: true });
     }
 
-    // Generate QR code (encode slot + email for kiosk)
-    const qrData = JSON.stringify({ slot, email });
-    const qrImage = await QRCode.toDataURL(qrData);
-
-    // Save reservation in Firebase
-    await db.ref(`reservations/${slot}`).set({
-      name,
-      plate,
-      vehicle,
-      email,
-      time,
-      timestamp: Date.now(),
-      status: "confirmed",
-      qr: qrImage
-    });
-
-    // Also mark slot as reserved
-    await db.ref(`${slot}/status`).set("reserved");
-
-    res.json({ success: true, message: "Reservation confirmed and saved", qr: qrImage });
-  } catch (error) {
-    console.error("Error confirming reservation:", error);
-    res.status(500).json({ error: "Internal server error" });
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Webhook error:", err);
+    res.sendStatus(500);
   }
 });
 
+// Start server
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`✅ IntelliPark backend running on port ${PORT}`);
 });
