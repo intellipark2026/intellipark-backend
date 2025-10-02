@@ -1,80 +1,90 @@
 const express = require("express");
-const bodyParser = require("body-parser");
 const cors = require("cors");
-const fetch = require("node-fetch");
+const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
-
+const QRCode = require("qrcode");
 require("dotenv").config();
 
-const app = express();
-const PORT = process.env.PORT || 8080;
-
-// ✅ Allow ALL origins for now (CORS fix)
-app.use(cors());
-app.use(bodyParser.json());
-
-// --- Initialize Firebase ---
 const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://intellipark2025-327e9-default-rtdb.firebaseio.com"
+  databaseURL: process.env.FIREBASE_DATABASE_URL
 });
 
 const db = admin.database();
+const app = express();
 
-// --- Xendit Keys ---
-const XENDIT_SECRET_KEY = process.env.XENDIT_SECRET_KEY;
+app.use(cors());
+app.use(bodyParser.json());
 
-// --- API: Create Invoice ---
+const PORT = process.env.PORT || 8080;
+
+// Test route
+app.get("/", (req, res) => {
+  res.send("✅ IntelliPark backend running!");
+});
+
+// Create invoice (simplified version)
 app.post("/api/create-invoice", async (req, res) => {
   try {
-    const { slotId, name, email, plate, vehicle, time, timestamp } = req.body;
+    const { slot, name, plate, vehicle, email, time } = req.body;
 
-    if (!email || !slotId) {
+    if (!slot || !email) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    const response = await fetch("https://api.xendit.co/v2/invoices", {
-      method: "POST",
-      headers: {
-        Authorization: "Basic " + Buffer.from(XENDIT_SECRET_KEY + ":").toString("base64"),
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        external_id: `resv-${Date.now()}`,
-        amount: 50,
-        currency: "PHP",
-        description: `Reservation for ${slotId}`,
-        payer_email: email,
-        success_redirect_url: `https://intellipark2025-327e9.web.app/confirmation.html?slot=${slotId}&name=${encodeURIComponent(
-          name
-        )}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}&time=${time}&timestamp=${encodeURIComponent(
-          timestamp
-        )}&email=${encodeURIComponent(email)}&should_redirect_top=true`
-      })
+    // Simulate invoice creation (replace with real Xendit call)
+    res.json({
+      invoice_url: "https://checkout.xendit.co/web/1234567890",
+      slot,
+      name,
+      plate,
+      vehicle,
+      email,
+      time
     });
-
-    const result = await response.json();
-
-    if (result.error) {
-      console.error("Xendit API error:", result);
-      return res.status(500).json({ error: "Failed to create invoice", details: result });
-    }
-
-    res.json(result);
-  } catch (err) {
-    console.error("Server error:", err);
+  } catch (error) {
+    console.error("Error creating invoice:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// --- Test route ---
-app.get("/", (req, res) => {
-  res.send("✅ IntelliPark backend is running.");
+// Confirm payment and save reservation
+app.post("/api/confirm-payment", async (req, res) => {
+  try {
+    const { slot, name, plate, vehicle, email, time } = req.body;
+
+    if (!slot || !email) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // Generate QR code (encode slot + email for kiosk)
+    const qrData = JSON.stringify({ slot, email });
+    const qrImage = await QRCode.toDataURL(qrData);
+
+    // Save reservation in Firebase
+    await db.ref(`reservations/${slot}`).set({
+      name,
+      plate,
+      vehicle,
+      email,
+      time,
+      timestamp: Date.now(),
+      status: "confirmed",
+      qr: qrImage
+    });
+
+    // Also mark slot as reserved
+    await db.ref(`${slot}/status`).set("reserved");
+
+    res.json({ success: true, message: "Reservation confirmed and saved", qr: qrImage });
+  } catch (error) {
+    console.error("Error confirming reservation:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
-// --- Start Server ---
 app.listen(PORT, () => {
   console.log(`✅ IntelliPark backend running on port ${PORT}`);
 });
