@@ -91,7 +91,7 @@ app.post("/api/create-invoice", async (req, res) => {
 
     // Call Xendit API to generate invoice
     const xenditPayload = {
-      external_id: `resv-${Date.now()}`,
+      external_id: `${slot}_${Date.now()}`, // ✅ FIXED: Now includes slot
       amount: 50,
       currency: "PHP",
       description: `Reservation for ${slot}`,
@@ -141,10 +141,9 @@ app.post("/api/xendit-webhook", async (req, res) => {
     console.log("🔔 Webhook received:", JSON.stringify(event, null, 2));
 
     if (event.status === "PAID") {
-      // Extract slot from external_id
+      // ✅ FIXED: Extract slot from external_id (format: "slot4_1234567890")
       const slot = event.external_id.split("_")[0];
       const email = event.payer_email || "N/A";
-      const name = event.description || "N/A";
       const amount = event.amount;
       const invoiceId = event.id;
 
@@ -152,10 +151,7 @@ app.post("/api/xendit-webhook", async (req, res) => {
 
       // Update Firebase
       await db.ref(`/reservations/${slot}`).set({
-        name: name,
         email: email,
-        plate: "N/A",
-        vehicle: "N/A",
         time: new Date().toLocaleTimeString(),
         timestamp: new Date().toISOString(),
         status: "Paid",
@@ -177,7 +173,6 @@ app.post("/api/xendit-webhook", async (req, res) => {
     res.sendStatus(500);
   }
 });
-
 
 // Start server
 const PORT = process.env.PORT || 8080;
