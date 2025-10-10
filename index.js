@@ -29,6 +29,9 @@ admin.initializeApp({
 });
 const db = admin.database();
 
+// ✅ Store pending reservations temporarily
+const pendingReservations = new Map();
+
 // Health check
 app.get("/", (req, res) => {
   res.send("✅ IntelliPark backend running");
@@ -87,11 +90,26 @@ app.post("/api/create-invoice", async (req, res) => {
     }
 
     const timestamp = new Date().toISOString();
+    const externalId = `${slot}_${Date.now()}`;
+    
     console.log(`✅ Validation passed. Creating invoice for ${email}, slot ${slot}`);
+
+    // ✅ Store reservation data temporarily (will be completed on payment)
+    pendingReservations.set(externalId, {
+      slot,
+      name,
+      email,
+      plate,
+      vehicle,
+      time,
+      timestamp
+    });
+
+    console.log(`💾 Stored pending reservation: ${externalId}`);
 
     // Call Xendit API to generate invoice
     const xenditPayload = {
-      external_id: `${slot}_${Date.now()}`, // ✅ FIXED: Now includes slot
+      external_id: externalId,
       amount: 50,
       currency: "PHP",
       description: `Reservation for ${slot}`,
@@ -115,6 +133,7 @@ app.post("/api/create-invoice", async (req, res) => {
 
     if (invoice.error_code) {
       console.error("❌ Xendit error:", invoice);
+      pendingReservations.delete(externalId); // Clean up
       return res.status(400).json({ 
         error: "Xendit API error", 
         details: invoice.message || invoice.error_code 
@@ -141,19 +160,31 @@ app.post("/api/xendit-webhook", async (req, res) => {
     console.log("🔔 Webhook received:", JSON.stringify(event, null, 2));
 
     if (event.status === "PAID") {
-      // ✅ FIXED: Extract slot from external_id (format: "slot4_1234567890")
-      const slot = event.external_id.split("_")[0];
-      const email = event.payer_email || "N/A";
+      const externalId = event.external_id;
+      
+      // ✅ Retrieve the stored reservation data
+      const reservationData = pendingReservations.get(externalId);
+      
+      if (!reservationData) {
+        console.error("❌ No pending reservation found for:", externalId);
+        return res.sendStatus(404);
+      }
+
+      const { slot, name, email, plate, vehicle, time, timestamp } = reservationData;
       const amount = event.amount;
       const invoiceId = event.id;
 
       console.log("📍 Processing payment for slot:", slot);
+      console.log("👤 Customer details:", { name, email, plate, vehicle });
 
-      // Update Firebase
+      // ✅ Update Firebase with COMPLETE reservation data
       await db.ref(`/reservations/${slot}`).set({
+        name: name,
         email: email,
-        time: new Date().toLocaleTimeString(),
-        timestamp: new Date().toISOString(),
+        plate: plate,
+        vehicle: vehicle,
+        time: time,
+        timestamp: timestamp,
         status: "Paid",
         amount: amount,
         invoiceId: invoiceId
@@ -164,7 +195,10 @@ app.post("/api/xendit-webhook", async (req, res) => {
         reserved: true 
       });
 
-      console.log(`✅ Reservation confirmed for ${slot}`);
+      // ✅ Clean up pending reservation
+      pendingReservations.delete(externalId);
+
+      console.log(`✅ Reservation confirmed for ${slot} - ${name} (${plate})`);
     }
 
     res.sendStatus(200);
