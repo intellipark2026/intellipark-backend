@@ -141,21 +141,33 @@ app.post("/api/xendit-webhook", async (req, res) => {
     console.log("🔔 Webhook received:", JSON.stringify(event, null, 2));
 
     if (event.status === "PAID") {
-      const metadata = event.external_id; // resv-xxxxx
-      const slot = event.description.split(" ")[2]; // extract slot
+      // Extract slot from external_id
+      const slot = event.external_id.split("_")[0];
+      const email = event.payer_email || "N/A";
+      const name = event.description || "N/A";
+      const amount = event.amount;
+      const invoiceId = event.id;
+
+      console.log("📍 Processing payment for slot:", slot);
 
       // Update Firebase
       await db.ref(`/reservations/${slot}`).set({
-        name: event.payer_name || "Unknown",
-        email: event.payer_email,
+        name: name,
+        email: email,
         plate: "N/A",
         vehicle: "N/A",
         time: new Date().toLocaleTimeString(),
         timestamp: new Date().toISOString(),
-        status: "Paid"
+        status: "Paid",
+        amount: amount,
+        invoiceId: invoiceId
       });
 
-      await db.ref(`/${slot}`).update({ status: "Reserved", reserved: true });
+      await db.ref(`/${slot}`).update({ 
+        status: "Reserved", 
+        reserved: true 
+      });
+
       console.log(`✅ Reservation confirmed for ${slot}`);
     }
 
@@ -165,6 +177,7 @@ app.post("/api/xendit-webhook", async (req, res) => {
     res.sendStatus(500);
   }
 });
+
 
 // Start server
 const PORT = process.env.PORT || 8080;
