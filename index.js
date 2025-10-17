@@ -1,4 +1,4 @@
-// Updated: 2025-10-10 - Auto deploy testtt
+// Updated: 2025-10-17 - Added walk-in payment support for kiosk
 // index.js
 const express = require("express");
 const cors = require("cors");
@@ -14,7 +14,9 @@ app.use(cors({
   origin: [
     "http://localhost:5500",
     "http://127.0.0.1:5500",
-    "https://intellipark2025-327e9.web.app"
+    "https://intellipark2025-327e9.web.app",
+    "https://intellipark-kiosk.web.app",
+    "https://intellipark-kiosk.firebaseapp.com"
   ]
 }));
 app.use(bodyParser.json());
@@ -38,12 +40,17 @@ app.get("/", (req, res) => {
   res.send("✅ IntelliPark backend running");
 });
 
-// Create invoice
+// UPDATED: Create invoice - handles both reservation and walk-in
 app.post("/api/create-invoice", async (req, res) => {
   try {
     console.log("📥 Received request body:", JSON.stringify(req.body, null, 2));
     
-    const { name, email, plate, vehicle, time, slot } = req.body;
+    const { name, email, plate, vehicle, time, slot, type } = req.body;
+
+    // Determine if this is walk-in or reservation
+    const isWalkin = type === 'walk-in';
+    
+    console.log(`📋 Request type: ${isWalkin ? 'WALK-IN' : 'RESERVATION'}`);
 
     // Detailed validation with specific error messages
     if (!slot) {
@@ -56,11 +63,6 @@ app.post("/api/create-invoice", async (req, res) => {
       return res.status(400).json({ error: "Missing email parameter" });
     }
     
-    if (!name) {
-      console.error("❌ Missing name parameter");
-      return res.status(400).json({ error: "Missing name parameter" });
-    }
-    
     if (!plate) {
       console.error("❌ Missing plate parameter");
       return res.status(400).json({ error: "Missing plate parameter" });
@@ -70,10 +72,17 @@ app.post("/api/create-invoice", async (req, res) => {
       console.error("❌ Missing vehicle parameter");
       return res.status(400).json({ error: "Missing vehicle parameter" });
     }
-    
-    if (!time) {
-      console.error("❌ Missing time parameter");
+
+    // Time is required only for reservations
+    if (!isWalkin && !time) {
+      console.error("❌ Missing time parameter for reservation");
       return res.status(400).json({ error: "Missing time parameter" });
+    }
+
+    // Name is required only for reservations
+    if (!isWalkin && !name) {
+      console.error("❌ Missing name parameter for reservation");
+      return res.status(400).json({ error: "Missing name parameter" });
     }
 
     // Validate email format
@@ -91,31 +100,59 @@ app.post("/api/create-invoice", async (req, res) => {
     }
 
     const timestamp = new Date().toISOString();
-    const externalId = `${slot}_${Date.now()}`;
+    
+    // Generate different external ID format based on type
+    const externalId = isWalkin 
+      ? `WALKIN_${slot}_${Date.now()}`
+      : `${slot}_${Date.now()}`;
     
     console.log(`✅ Validation passed. Creating invoice for ${email}, slot ${slot}`);
 
-    // ✅ Store reservation data temporarily (will be completed on payment)
-    pendingReservations.set(externalId, {
-      slot,
-      name,
-      email,
-      plate,
-      vehicle,
-      time,
-      timestamp
-    });
+    // ✅ Store reservation/walk-in data temporarily (will be completed on payment)
+    const pendingData = isWalkin 
+      ? {
+          slot,
+          email,
+          plate,
+          vehicle,
+          timestamp,
+          type: 'walk-in'
+        }
+      : {
+          slot,
+          name,
+          email,
+          plate,
+          vehicle,
+          time,
+          timestamp,
+          type: 'reservation'
+        };
 
-    console.log(`💾 Stored pending reservation: ${externalId}`);
+    pendingReservations.set(externalId, pendingData);
+
+    console.log(`💾 Stored pending ${isWalkin ? 'walk-in' : 'reservation'}: ${externalId}`);
+
+    // Determine redirect URLs based on type
+    const successUrl = isWalkin
+      ? `https://intellipark-kiosk.web.app/payment-success.html?slot=${slot}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}`
+      : `https://intellipark2025-327e9.web.app/confirmation.html?slot=${slot}&name=${encodeURIComponent(name)}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}&time=${time}&timestamp=${encodeURIComponent(timestamp)}&email=${encodeURIComponent(email)}`;
+
+    const failureUrl = isWalkin
+      ? `https://intellipark-kiosk.web.app/payment-failed.html`
+      : `https://intellipark2025-327e9.web.app/payment-failed.html`;
 
     // Call Xendit API to generate invoice
     const xenditPayload = {
       external_id: externalId,
       amount: 50,
       currency: "PHP",
-      description: `Reservation for ${slot}`,
+      description: isWalkin 
+        ? `Walk-in Parking - ${slot}` 
+        : `Reservation for ${slot}`,
       payer_email: email,
-      success_redirect_url: `https://intellipark2025-327e9.web.app/confirmation.html?slot=${slot}&name=${encodeURIComponent(name)}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}&time=${time}&timestamp=${encodeURIComponent(timestamp)}&email=${encodeURIComponent(email)}`
+      success_redirect_url: successUrl,
+      failure_redirect_url: failureUrl
     };
 
     console.log("📤 Sending to Xendit:", JSON.stringify(xenditPayload, null, 2));
@@ -142,7 +179,14 @@ app.post("/api/create-invoice", async (req, res) => {
     }
 
     console.log("✅ Invoice created successfully:", invoice.id);
-    res.json(invoice);
+    
+    // Return response with success flag and invoice URL
+    res.json({
+      success: true,
+      invoiceUrl: invoice.invoice_url,
+      externalId: externalId,
+      invoice: invoice
+    });
 
   } catch (err) {
     console.error("❌ Error creating invoice:", err.message);
@@ -154,7 +198,7 @@ app.post("/api/create-invoice", async (req, res) => {
   }
 });
 
-// Webhook for payment confirmation
+// UPDATED: Webhook for payment confirmation - handles both types
 app.post("/api/xendit-webhook", async (req, res) => {
   try {
     const event = req.body;
@@ -171,26 +215,52 @@ app.post("/api/xendit-webhook", async (req, res) => {
         return res.sendStatus(404);
       }
 
-      const { slot, name, email, plate, vehicle, time, timestamp } = reservationData;
+      const { slot, email, plate, vehicle, timestamp, type } = reservationData;
       const amount = event.amount;
       const invoiceId = event.id;
 
-      console.log("📍 Processing payment for slot:", slot);
-      console.log("👤 Customer details:", { name, email, plate, vehicle });
+      const isWalkin = type === 'walk-in';
 
-      // ✅ Update Firebase with COMPLETE reservation data
-      await db.ref(`/reservations/${slot}`).set({
-        name: name,
-        email: email,
-        plate: plate,
-        vehicle: vehicle,
-        time: time,
-        timestamp: timestamp,
-        status: "Paid",
-        amount: amount,
-        invoiceId: invoiceId
-      });
+      console.log(`📍 Processing payment for slot: ${slot} (${isWalkin ? 'WALK-IN' : 'RESERVATION'})`);
+      console.log("👤 Customer details:", { email, plate, vehicle });
 
+      if (isWalkin) {
+        // ✅ Save walk-in booking to separate path in Firebase
+        await db.ref(`/walk-in-bookings/${externalId}`).set({
+          slot: slot,
+          email: email,
+          plate: plate,
+          vehicle: vehicle,
+          timestamp: timestamp,
+          status: "Paid",
+          amount: amount,
+          invoiceId: invoiceId,
+          type: 'walk-in'
+        });
+
+        console.log(`✅ Walk-in booking confirmed for ${slot} - ${plate}`);
+
+      } else {
+        // ✅ Save reservation to original path (existing logic)
+        const { name, time } = reservationData;
+        
+        await db.ref(`/reservations/${slot}`).set({
+          name: name,
+          email: email,
+          plate: plate,
+          vehicle: vehicle,
+          time: time,
+          timestamp: timestamp,
+          status: "Paid",
+          amount: amount,
+          invoiceId: invoiceId,
+          type: 'reservation'
+        });
+
+        console.log(`✅ Reservation confirmed for ${slot} - ${name} (${plate})`);
+      }
+
+      // ✅ Update slot status (both types)
       await db.ref(`/${slot}`).update({ 
         status: "Reserved", 
         reserved: true 
@@ -199,13 +269,46 @@ app.post("/api/xendit-webhook", async (req, res) => {
       // ✅ Clean up pending reservation
       pendingReservations.delete(externalId);
 
-      console.log(`✅ Reservation confirmed for ${slot} - ${name} (${plate})`);
+      console.log(`✅ Payment processed successfully for ${externalId}`);
     }
 
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ Webhook error:", err.message);
     res.sendStatus(500);
+  }
+});
+
+// Get booking status (works for both types)
+app.get("/api/booking/:externalId", async (req, res) => {
+  try {
+    const { externalId } = req.params;
+    
+    console.log(`🔍 Checking booking status for: ${externalId}`);
+
+    // Check if it's walk-in or reservation
+    const isWalkin = externalId.includes('WALKIN');
+    const path = isWalkin 
+      ? `/walk-in-bookings/${externalId}` 
+      : `/reservations/${externalId}`;
+
+    const snapshot = await db.ref(path).once('value');
+    const booking = snapshot.val();
+
+    if (!booking) {
+      console.log(`❌ Booking not found: ${externalId}`);
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    console.log(`✅ Booking found: ${externalId}`);
+    res.json({
+      success: true,
+      booking: booking
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching booking:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
