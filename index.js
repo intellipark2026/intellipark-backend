@@ -397,6 +397,70 @@ app.post("/api/verify-exit", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+// ✅ Simple exit endpoint (called by exit kiosk)
+app.post("/api/exit", async (req, res) => {
+  try {
+    const { slot, plate, exitTime } = req.body;
+    
+    console.log(`🚪 Exit request - Slot: ${slot}, Plate: ${plate}`);
+
+    if (!slot || !plate) {
+      return res.status(400).json({ error: "Missing slot or plate" });
+    }
+
+    // Check reservation
+    const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
+    
+    if (!reservationSnapshot.exists()) {
+      console.log(`❌ No reservation for slot: ${slot}`);
+      return res.status(404).json({ error: "No reservation found" });
+    }
+
+    const reservation = reservationSnapshot.val();
+
+    // Verify plate
+    if (reservation.plate !== plate) {
+      console.log(`❌ Plate mismatch: Expected ${reservation.plate}, got ${plate}`);
+      return res.status(403).json({ error: "Plate mismatch" });
+    }
+
+    const exitTimestamp = exitTime || new Date().toISOString();
+    
+    // Update with exit time
+    await db.ref(`/reservations/${slot}`).update({
+      exitTime: exitTimestamp,
+      status: "Completed"
+    });
+
+    // Free the slot
+    await db.ref(`/${slot}`).update({
+      status: "Available",
+      reserved: false
+    });
+
+    // Calculate duration
+    const entryTime = new Date(reservation.timestamp);
+    const exitTimeDate = new Date(exitTimestamp);
+    const durationMs = exitTimeDate - entryTime;
+    const durationMins = Math.floor(durationMs / 60000);
+    const hours = Math.floor(durationMins / 60);
+    const mins = durationMins % 60;
+
+    console.log(`✅ Exit recorded - ${slot} - Duration: ${hours}h ${mins}m`);
+
+    res.json({
+      success: true,
+      message: "Gate opened",
+      exitTime: exitTimestamp,
+      duration: `${hours}h ${mins}m`
+    });
+
+  } catch (error) {
+    console.error("❌ Exit error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 // Get booking status (works for both types)
 app.get("/api/booking/:externalId", async (req, res) => {
