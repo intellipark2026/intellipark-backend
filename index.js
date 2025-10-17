@@ -1,12 +1,10 @@
-// Updated: 2025-10-17 - Added walk-in payment support and exit time tracking
-// index.js
+// Updated: 2025-10-17 - Walk-in payments + Exit tracking + Update existing reservations
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
 const fetch = require("node-fetch");
 
-// Load environment variables from .env
 require("dotenv").config();
 
 const app = express();
@@ -21,7 +19,6 @@ app.use(cors({
 }));
 app.use(bodyParser.json());
 
-// Firebase Admin setup
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -32,108 +29,50 @@ admin.initializeApp({
 });
 const db = admin.database();
 
-// ✅ Store pending reservations temporarily
 const pendingReservations = new Map();
 
-// Health check
 app.get("/", (req, res) => {
   res.send("✅ IntelliPark backend running");
 });
 
-// UPDATED: Create invoice - handles both reservation and walk-in
 app.post("/api/create-invoice", async (req, res) => {
   try {
     console.log("📥 Received request body:", JSON.stringify(req.body, null, 2));
     
     const { name, email, plate, vehicle, time, slot, type } = req.body;
-
-    // Determine if this is walk-in or reservation
     const isWalkin = type === 'walk-in';
     
     console.log(`📋 Request type: ${isWalkin ? 'WALK-IN' : 'RESERVATION'}`);
 
-    // Detailed validation with specific error messages
-    if (!slot) {
-      console.error("❌ Missing slot parameter");
-      return res.status(400).json({ error: "Missing slot parameter" });
-    }
-    
-    if (!email) {
-      console.error("❌ Missing email parameter");
-      return res.status(400).json({ error: "Missing email parameter" });
-    }
-    
-    if (!plate) {
-      console.error("❌ Missing plate parameter");
-      return res.status(400).json({ error: "Missing plate parameter" });
-    }
-    
-    if (!vehicle) {
-      console.error("❌ Missing vehicle parameter");
-      return res.status(400).json({ error: "Missing vehicle parameter" });
-    }
+    if (!slot) return res.status(400).json({ error: "Missing slot parameter" });
+    if (!email) return res.status(400).json({ error: "Missing email parameter" });
+    if (!plate) return res.status(400).json({ error: "Missing plate parameter" });
+    if (!vehicle) return res.status(400).json({ error: "Missing vehicle parameter" });
+    if (!isWalkin && !time) return res.status(400).json({ error: "Missing time parameter" });
+    if (!isWalkin && !name) return res.status(400).json({ error: "Missing name parameter" });
 
-    // Time is required only for reservations
-    if (!isWalkin && !time) {
-      console.error("❌ Missing time parameter for reservation");
-      return res.status(400).json({ error: "Missing time parameter" });
-    }
-
-    // Name is required only for reservations
-    if (!isWalkin && !name) {
-      console.error("❌ Missing name parameter for reservation");
-      return res.status(400).json({ error: "Missing name parameter" });
-    }
-
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      console.error("❌ Invalid email format:", email);
       return res.status(400).json({ error: "Invalid email format" });
     }
 
-    // Validate plate format (ABC123)
     const plateRegex = /^[A-Za-z]{3}[0-9]{3}$/;
     if (!plateRegex.test(plate)) {
-      console.error("❌ Invalid plate format:", plate);
       return res.status(400).json({ error: "Plate number must be in format ABC123 (3 letters + 3 digits)" });
     }
 
     const timestamp = new Date().toISOString();
-    
-    // Generate different external ID format based on type
-    const externalId = isWalkin 
-      ? `WALKIN_${slot}_${Date.now()}`
-      : `${slot}_${Date.now()}`;
+    const externalId = isWalkin ? `WALKIN_${slot}_${Date.now()}` : `${slot}_${Date.now()}`;
     
     console.log(`✅ Validation passed. Creating invoice for ${email}, slot ${slot}`);
 
-    // ✅ Store reservation/walk-in data temporarily (will be completed on payment)
     const pendingData = isWalkin 
-      ? {
-          slot,
-          email,
-          plate,
-          vehicle,
-          timestamp,
-          type: 'walk-in'
-        }
-      : {
-          slot,
-          name,
-          email,
-          plate,
-          vehicle,
-          time,
-          timestamp,
-          type: 'reservation'
-        };
+      ? { slot, email, plate, vehicle, timestamp, type: 'walk-in' }
+      : { slot, name, email, plate, vehicle, time, timestamp, type: 'reservation' };
 
     pendingReservations.set(externalId, pendingData);
-
     console.log(`💾 Stored pending ${isWalkin ? 'walk-in' : 'reservation'}: ${externalId}`);
 
-    // Determine redirect URLs based on type
     const successUrl = isWalkin
       ? `https://intellipark-kiosk.web.app/payment-success.html?slot=${slot}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}`
       : `https://intellipark2025-327e9.web.app/confirmation.html?slot=${slot}&name=${encodeURIComponent(name)}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}&time=${time}&timestamp=${encodeURIComponent(timestamp)}&email=${encodeURIComponent(email)}`;
@@ -142,14 +81,11 @@ app.post("/api/create-invoice", async (req, res) => {
       ? `https://intellipark-kiosk.web.app/payment-failed.html`
       : `https://intellipark2025-327e9.web.app/payment-failed.html`;
 
-    // Call Xendit API to generate invoice
     const xenditPayload = {
       external_id: externalId,
       amount: 50,
       currency: "PHP",
-      description: isWalkin 
-        ? `Walk-in Parking - ${slot}` 
-        : `Reservation for ${slot}`,
+      description: isWalkin ? `Walk-in Parking - ${slot}` : `Reservation for ${slot}`,
       payer_email: email,
       success_redirect_url: successUrl,
       failure_redirect_url: failureUrl
@@ -171,16 +107,12 @@ app.post("/api/create-invoice", async (req, res) => {
 
     if (invoice.error_code) {
       console.error("❌ Xendit error:", invoice);
-      pendingReservations.delete(externalId); // Clean up
-      return res.status(400).json({ 
-        error: "Xendit API error", 
-        details: invoice.message || invoice.error_code 
-      });
+      pendingReservations.delete(externalId);
+      return res.status(400).json({ error: "Xendit API error", details: invoice.message || invoice.error_code });
     }
 
     console.log("✅ Invoice created successfully:", invoice.id);
     
-    // Return response with success flag and invoice URL
     res.json({
       success: true,
       invoiceUrl: invoice.invoice_url,
@@ -191,14 +123,11 @@ app.post("/api/create-invoice", async (req, res) => {
   } catch (err) {
     console.error("❌ Error creating invoice:", err.message);
     console.error("Stack trace:", err.stack);
-    res.status(500).json({ 
-      error: "Failed to create invoice", 
-      details: err.message 
-    });
+    res.status(500).json({ error: "Failed to create invoice", details: err.message });
   }
 });
 
-// UPDATED: Webhook for payment confirmation - handles both types
+// ✅ UPDATED: Webhook UPDATES existing reservation instead of creating new
 app.post("/api/xendit-webhook", async (req, res) => {
   try {
     const event = req.body;
@@ -206,8 +135,6 @@ app.post("/api/xendit-webhook", async (req, res) => {
 
     if (event.status === "PAID") {
       const externalId = event.external_id;
-      
-      // ✅ Retrieve the stored reservation data
       const reservationData = pendingReservations.get(externalId);
       
       if (!reservationData) {
@@ -218,57 +145,35 @@ app.post("/api/xendit-webhook", async (req, res) => {
       const { slot, email, plate, vehicle, timestamp, type } = reservationData;
       const amount = event.amount;
       const invoiceId = event.id;
-
       const isWalkin = type === 'walk-in';
 
       console.log(`📍 Processing payment for slot: ${slot} (${isWalkin ? 'WALK-IN' : 'RESERVATION'})`);
       console.log("👤 Customer details:", { email, plate, vehicle });
 
+      // ✅ UPDATE existing reservation with payment info (not create new)
       if (isWalkin) {
-        // ✅ Save walk-in booking to separate path in Firebase
-        await db.ref(`/walk-in-bookings/${externalId}`).set({
-          slot: slot,
-          email: email,
-          plate: plate,
-          vehicle: vehicle,
-          timestamp: timestamp,
+        await db.ref(`/reservations/${slot}`).update({
           status: "Paid",
           amount: amount,
           invoiceId: invoiceId,
+          paymentTime: new Date().toISOString(),
           type: 'walk-in'
         });
-
-        console.log(`✅ Walk-in booking confirmed for ${slot} - ${plate}`);
+        console.log(`✅ Walk-in payment confirmed for ${slot} - ${plate}`);
 
       } else {
-        // ✅ Save reservation to original path (existing logic)
         const { name, time } = reservationData;
-        
-        await db.ref(`/reservations/${slot}`).set({
-          name: name,
-          email: email,
-          plate: plate,
-          vehicle: vehicle,
-          time: time,
-          timestamp: timestamp,
+        await db.ref(`/reservations/${slot}`).update({
           status: "Paid",
           amount: amount,
           invoiceId: invoiceId,
-          type: 'reservation'
+          paymentTime: new Date().toISOString()
         });
-
-        console.log(`✅ Reservation confirmed for ${slot} - ${name} (${plate})`);
+        console.log(`✅ Reservation payment confirmed for ${slot} - ${name} (${plate})`);
       }
 
-      // ✅ Update slot status (both types)
-      await db.ref(`/${slot}`).update({ 
-        status: "Reserved", 
-        reserved: true 
-      });
-
-      // ✅ Clean up pending reservation
+      await db.ref(`/${slot}`).update({ status: "Reserved", reserved: true });
       pendingReservations.delete(externalId);
-
       console.log(`✅ Payment processed successfully for ${externalId}`);
     }
 
@@ -279,22 +184,76 @@ app.post("/api/xendit-webhook", async (req, res) => {
   }
 });
 
-// ✅ NEW: Record vehicle exit (Time Out)
+// ✅ Exit endpoint (called by exit kiosk)
+app.post("/api/exit", async (req, res) => {
+  try {
+    const { slot, plate, exitTime } = req.body;
+    
+    console.log(`🚪 Exit request - Slot: ${slot}, Plate: ${plate}`);
+
+    if (!slot || !plate) {
+      return res.status(400).json({ error: "Missing slot or plate" });
+    }
+
+    const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
+    
+    if (!reservationSnapshot.exists()) {
+      console.log(`❌ No reservation for slot: ${slot}`);
+      return res.status(404).json({ error: "No reservation found" });
+    }
+
+    const reservation = reservationSnapshot.val();
+
+    if (reservation.plate !== plate) {
+      console.log(`❌ Plate mismatch: Expected ${reservation.plate}, got ${plate}`);
+      return res.status(403).json({ error: "Plate mismatch" });
+    }
+
+    const exitTimestamp = exitTime || new Date().toISOString();
+    
+    await db.ref(`/reservations/${slot}`).update({
+      exitTime: exitTimestamp,
+      status: "Completed"
+    });
+
+    await db.ref(`/${slot}`).update({
+      status: "Available",
+      reserved: false
+    });
+
+    const entryTime = new Date(reservation.timestamp);
+    const exitTimeDate = new Date(exitTimestamp);
+    const durationMs = exitTimeDate - entryTime;
+    const durationMins = Math.floor(durationMs / 60000);
+    const hours = Math.floor(durationMins / 60);
+    const mins = durationMins % 60;
+
+    console.log(`✅ Exit recorded - ${slot} - Duration: ${hours}h ${mins}m`);
+
+    res.json({
+      success: true,
+      message: "Gate opened",
+      exitTime: exitTimestamp,
+      duration: `${hours}h ${mins}m`,
+      slot: slot,
+      plate: plate
+    });
+
+  } catch (error) {
+    console.error("❌ Exit error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post("/api/record-exit", async (req, res) => {
   try {
     const { slot, plate } = req.body;
     
     console.log(`🚪 Exit request for slot: ${slot}, plate: ${plate}`);
 
-    if (!slot) {
-      return res.status(400).json({ error: "Missing slot parameter" });
-    }
+    if (!slot) return res.status(400).json({ error: "Missing slot parameter" });
+    if (!plate) return res.status(400).json({ error: "Missing plate parameter" });
 
-    if (!plate) {
-      return res.status(400).json({ error: "Missing plate parameter" });
-    }
-
-    // Check if reservation exists
     const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
     
     if (!reservationSnapshot.exists()) {
@@ -304,13 +263,11 @@ app.post("/api/record-exit", async (req, res) => {
 
     const reservation = reservationSnapshot.val();
 
-    // Verify plate number matches
     if (reservation.plate !== plate) {
       console.log(`❌ Plate mismatch: Expected ${reservation.plate}, got ${plate}`);
       return res.status(403).json({ error: "Plate number does not match reservation" });
     }
 
-    // Record exit time
     const exitTime = new Date().toISOString();
     
     await db.ref(`/reservations/${slot}`).update({
@@ -318,13 +275,11 @@ app.post("/api/record-exit", async (req, res) => {
       status: "Completed"
     });
 
-    // Update slot status to Available
     await db.ref(`/${slot}`).update({
       status: "Available",
       reserved: false
     });
 
-    // Calculate duration
     const entryTime = new Date(reservation.timestamp);
     const exitTimeDate = new Date(exitTime);
     const durationMs = exitTimeDate - entryTime;
@@ -348,7 +303,6 @@ app.post("/api/record-exit", async (req, res) => {
   }
 });
 
-// ✅ NEW: Verify reservation by plate (for exit kiosk)
 app.post("/api/verify-exit", async (req, res) => {
   try {
     const { plate } = req.body;
@@ -359,7 +313,6 @@ app.post("/api/verify-exit", async (req, res) => {
       return res.status(400).json({ error: "Missing plate parameter" });
     }
 
-    // Search for reservation with this plate
     const reservationsSnapshot = await db.ref('/reservations').once('value');
     const reservations = reservationsSnapshot.val();
 
@@ -367,7 +320,6 @@ app.post("/api/verify-exit", async (req, res) => {
       return res.status(404).json({ error: "No active reservations found" });
     }
 
-    // Find matching reservation
     let matchingSlot = null;
     let matchingReservation = null;
 
@@ -397,83 +349,15 @@ app.post("/api/verify-exit", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-// ✅ Simple exit endpoint (called by exit kiosk)
-app.post("/api/exit", async (req, res) => {
-  try {
-    const { slot, plate, exitTime } = req.body;
-    
-    console.log(`🚪 Exit request - Slot: ${slot}, Plate: ${plate}`);
 
-    if (!slot || !plate) {
-      return res.status(400).json({ error: "Missing slot or plate" });
-    }
-
-    // Check reservation
-    const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
-    
-    if (!reservationSnapshot.exists()) {
-      console.log(`❌ No reservation for slot: ${slot}`);
-      return res.status(404).json({ error: "No reservation found" });
-    }
-
-    const reservation = reservationSnapshot.val();
-
-    // Verify plate
-    if (reservation.plate !== plate) {
-      console.log(`❌ Plate mismatch: Expected ${reservation.plate}, got ${plate}`);
-      return res.status(403).json({ error: "Plate mismatch" });
-    }
-
-    const exitTimestamp = exitTime || new Date().toISOString();
-    
-    // Update with exit time
-    await db.ref(`/reservations/${slot}`).update({
-      exitTime: exitTimestamp,
-      status: "Completed"
-    });
-
-    // Free the slot
-    await db.ref(`/${slot}`).update({
-      status: "Available",
-      reserved: false
-    });
-
-    // Calculate duration
-    const entryTime = new Date(reservation.timestamp);
-    const exitTimeDate = new Date(exitTimestamp);
-    const durationMs = exitTimeDate - entryTime;
-    const durationMins = Math.floor(durationMs / 60000);
-    const hours = Math.floor(durationMins / 60);
-    const mins = durationMins % 60;
-
-    console.log(`✅ Exit recorded - ${slot} - Duration: ${hours}h ${mins}m`);
-
-    res.json({
-      success: true,
-      message: "Gate opened",
-      exitTime: exitTimestamp,
-      duration: `${hours}h ${mins}m`
-    });
-
-  } catch (error) {
-    console.error("❌ Exit error:", error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-
-// Get booking status (works for both types)
 app.get("/api/booking/:externalId", async (req, res) => {
   try {
     const { externalId } = req.params;
     
     console.log(`🔍 Checking booking status for: ${externalId}`);
 
-    // Check if it's walk-in or reservation
     const isWalkin = externalId.includes('WALKIN');
-    const path = isWalkin 
-      ? `/walk-in-bookings/${externalId}` 
-      : `/reservations/${externalId}`;
+    const path = isWalkin ? `/walk-in-bookings/${externalId}` : `/reservations/${externalId}`;
 
     const snapshot = await db.ref(path).once('value');
     const booking = snapshot.val();
@@ -484,10 +368,7 @@ app.get("/api/booking/:externalId", async (req, res) => {
     }
 
     console.log(`✅ Booking found: ${externalId}`);
-    res.json({
-      success: true,
-      booking: booking
-    });
+    res.json({ success: true, booking: booking });
 
   } catch (error) {
     console.error('❌ Error fetching booking:', error);
@@ -495,7 +376,6 @@ app.get("/api/booking/:externalId", async (req, res) => {
   }
 });
 
-// Start server
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`✅ IntelliPark backend running on port ${PORT}`);
