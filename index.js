@@ -1,4 +1,4 @@
-// Updated: 2025-10-17 - Added walk-in payment support for kiosk
+// Updated: 2025-10-17 - Added walk-in payment support and exit time tracking
 // index.js
 const express = require("express");
 const cors = require("cors");
@@ -276,6 +276,125 @@ app.post("/api/xendit-webhook", async (req, res) => {
   } catch (err) {
     console.error("❌ Webhook error:", err.message);
     res.sendStatus(500);
+  }
+});
+
+// ✅ NEW: Record vehicle exit (Time Out)
+app.post("/api/record-exit", async (req, res) => {
+  try {
+    const { slot, plate } = req.body;
+    
+    console.log(`🚪 Exit request for slot: ${slot}, plate: ${plate}`);
+
+    if (!slot) {
+      return res.status(400).json({ error: "Missing slot parameter" });
+    }
+
+    if (!plate) {
+      return res.status(400).json({ error: "Missing plate parameter" });
+    }
+
+    // Check if reservation exists
+    const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
+    
+    if (!reservationSnapshot.exists()) {
+      console.log(`❌ No reservation found for slot: ${slot}`);
+      return res.status(404).json({ error: "No reservation found for this slot" });
+    }
+
+    const reservation = reservationSnapshot.val();
+
+    // Verify plate number matches
+    if (reservation.plate !== plate) {
+      console.log(`❌ Plate mismatch: Expected ${reservation.plate}, got ${plate}`);
+      return res.status(403).json({ error: "Plate number does not match reservation" });
+    }
+
+    // Record exit time
+    const exitTime = new Date().toISOString();
+    
+    await db.ref(`/reservations/${slot}`).update({
+      exitTime: exitTime,
+      status: "Completed"
+    });
+
+    // Update slot status to Available
+    await db.ref(`/${slot}`).update({
+      status: "Available",
+      reserved: false
+    });
+
+    // Calculate duration
+    const entryTime = new Date(reservation.timestamp);
+    const exitTimeDate = new Date(exitTime);
+    const durationMs = exitTimeDate - entryTime;
+    const durationMins = Math.floor(durationMs / 60000);
+    const hours = Math.floor(durationMins / 60);
+    const mins = durationMins % 60;
+
+    console.log(`✅ Exit recorded for ${slot} - Duration: ${hours}h ${mins}m`);
+
+    res.json({
+      success: true,
+      message: "Exit recorded successfully",
+      exitTime: exitTime,
+      duration: `${hours}h ${mins}m`,
+      entryTime: reservation.timestamp
+    });
+
+  } catch (error) {
+    console.error("❌ Error recording exit:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ NEW: Verify reservation by plate (for exit kiosk)
+app.post("/api/verify-exit", async (req, res) => {
+  try {
+    const { plate } = req.body;
+    
+    console.log(`🔍 Verifying exit for plate: ${plate}`);
+
+    if (!plate) {
+      return res.status(400).json({ error: "Missing plate parameter" });
+    }
+
+    // Search for reservation with this plate
+    const reservationsSnapshot = await db.ref('/reservations').once('value');
+    const reservations = reservationsSnapshot.val();
+
+    if (!reservations) {
+      return res.status(404).json({ error: "No active reservations found" });
+    }
+
+    // Find matching reservation
+    let matchingSlot = null;
+    let matchingReservation = null;
+
+    for (const [slot, reservation] of Object.entries(reservations)) {
+      if (reservation.plate === plate && reservation.status === "Paid") {
+        matchingSlot = slot;
+        matchingReservation = reservation;
+        break;
+      }
+    }
+
+    if (!matchingSlot) {
+      return res.status(404).json({ error: "No active reservation found for this plate number" });
+    }
+
+    console.log(`✅ Found reservation: ${matchingSlot} for plate ${plate}`);
+
+    res.json({
+      success: true,
+      slot: matchingSlot,
+      reservation: matchingReservation,
+      message: "Reservation verified"
+    });
+
+  } catch (error) {
+    console.error("❌ Error verifying exit:", error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
