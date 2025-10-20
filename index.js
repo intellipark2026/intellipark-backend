@@ -45,6 +45,7 @@ app.post("/api/create-invoice", async (req, res) => {
     
     console.log(`📋 Request type: ${isWalkin ? 'WALK-IN' : 'WEBSITE BOOKING'}`);
 
+    // Validation
     if (!slot) return res.status(400).json({ error: "Missing slot parameter" });
     if (!email) return res.status(400).json({ error: "Missing email parameter" });
     if (!plate) return res.status(400).json({ error: "Missing plate parameter" });
@@ -62,80 +63,94 @@ app.post("/api/create-invoice", async (req, res) => {
       return res.status(400).json({ error: "Plate number must be in format ABC123 (3 letters + 3 digits)" });
     }
 
-    // ✅ Check if slot is available
-    // ✅ UPDATED: Different availability logic for walk-ins vs website bookings
+    // Check slot availability
     const slotSnapshot = await db.ref(`/${slot}/status`).once('value');
     const slotStatus = slotSnapshot.val();
-
-    // For website bookings, slot must be Available
+    
     if (!isWalkin && slotStatus !== 'Available') {
       console.log(`❌ Slot ${slot} is ${slotStatus}, not available for website booking`);
-      return res.status(400).json({ 
-        error: `Slot ${slot} is no longer available` 
-      });
+      return res.status(400).json({ error: `Slot ${slot} is no longer available` });
     }
-
-    // For walk-ins, allow if Available OR if Reserved but payment is pending/expired
-    if (isWalkin) {
-      if (slotStatus === 'Occupied') {
-        console.log(`❌ Slot ${slot} is Occupied, cannot be used`);
-        return res.status(400).json({ 
-          error: `Slot ${slot} is currently occupied` 
-        });
+    
+    if (isWalkin && slotStatus === 'Occupied') {
+      console.log(`❌ Slot ${slot} is Occupied`);
+      return res.status(400).json({ error: `Slot ${slot} is currently occupied` });
+    }
+    
+    if (isWalkin && slotStatus === 'Reserved') {
+      const existingReservation = await db.ref(`/reservations/${slot}`).once('value');
+      const reservation = existingReservation.val();
+      
+      if (reservation && reservation.status === 'Paid') {
+        console.log(`❌ Slot ${slot} has a paid reservation`);
+        return res.status(400).json({ error: `Slot ${slot} is already reserved and paid` });
       }
       
-      // If Reserved, check if there's an existing reservation
-      if (slotStatus === 'Reserved') {
-        const existingReservation = await db.ref(`/reservations/${slot}`).once('value');
-        const reservation = existingReservation.val();
-        
-        // Allow walk-in to override if existing reservation is Pending (not yet paid)
-        if (reservation && reservation.status === 'Pending') {
-          console.log(`⚠️ Overriding pending reservation for ${slot} with walk-in`);
-          // Remove the old pending reservation
-          await db.ref(`/reservations/${slot}`).remove();
-        } else if (reservation && reservation.status === 'Paid') {
-          console.log(`❌ Slot ${slot} has a paid reservation`);
-          return res.status(400).json({ 
-            error: `Slot ${slot} is already reserved and paid` 
-          });
-        }
+      if (reservation && reservation.status === 'Pending') {
+        console.log(`⚠️ Overriding pending reservation for ${slot}`);
+        await db.ref(`/reservations/${slot}`).remove();
       }
-      
-      console.log(`✅ Slot ${slot} is available for walk-in`);
     }
+    
+    console.log(`✅ Slot ${slot} is available for ${isWalkin ? 'walk-in' : 'booking'}`);
 
-    // ✅ CREATE INITIAL RESERVATION IN FIREBASE (Status: Pending)
-    if (!isWalkin) {
-      const initialReservation = {
-        name: name,
-        email: email,
-        plate: plate,
-        vehicle: vehicle,
-        slot: slot,
-        status: 'Pending', // Will be updated to 'Paid' by webhook
-        amount: 50,
-        timestamp: timestamp,
-        reservedVia: 'Website', // ✅ Distinguishes from kiosk
-        exitTime: null,
-        bookingTime: time,
-        externalId: externalId,
-        invoiceCreated: timestamp
-      };
+    // ✅ CRITICAL: Define timestamp and externalId EARLY
+    const timestamp = new Date().toISOString();
+    const externalId = isWalkin ? `WALKIN_${slot}_${Date.now()}` : `WEBSITE_${slot}_${Date.now()}`;
+    
+    console.log(`✅ Validation passed. Creating invoice for ${email}, slot ${slot}`);
+    console.log(`📝 External ID: ${externalId}`);
 
-      await db.ref(`/reservations/${slot}`).set(initialReservation);
-      console.log(`✅ Initial reservation created in Firebase: ${slot} (Status: Pending)`);
+    // Store in memory
+    const pendingData = isWalkin 
+      ? { slot, email, plate, vehicle, timestamp, type: 'walk-in' }
+      : { slot, name, email, plate, vehicle, time, timestamp, type: 'website-booking' };
 
-      // Update slot status to Reserved (pending payment)
-      await db.ref(`/${slot}`).update({ 
-        status: 'Reserved', 
-        reserved: true,
-        reservedBy: name,
-        reservationType: 'Website'
-      });
-      console.log(`✅ Slot ${slot} marked as Reserved (pending payment)`);
-    }
+    pendingReservations.set(externalId, pendingData);
+    console.log(`💾 Stored pending ${isWalkin ? 'walk-in' : 'website booking'}: ${externalId}`);
 
+    // ✅ CREATE INITIAL RESERVATION IN FIREBASE
+    const initialReservation = isWalkin ? {
+      email: email,
+      plate: plate,
+      vehicle: vehicle,
+      slot: slot,
+      status: 'Pending',
+      amount: 50,
+      timestamp: timestamp,
+      reservedVia: 'Kiosk',
+      exitTime: null,
+      externalId: externalId,
+      type: 'walk-in'
+    } : {
+      name: name,
+      email: email,
+      plate: plate,
+      vehicle: vehicle,
+      slot: slot,
+      status: 'Pending',
+      amount: 50,
+      timestamp: timestamp,
+      reservedVia: 'Website',
+      exitTime: null,
+      bookingTime: time,
+      externalId: externalId,
+      invoiceCreated: timestamp
+    };
+
+    await db.ref(`/reservations/${slot}`).set(initialReservation);
+    console.log(`✅ Initial reservation created in Firebase: ${slot} (Status: Pending)`);
+
+    // Update slot status
+    await db.ref(`/${slot}`).update({ 
+      status: 'Reserved', 
+      reserved: true,
+      reservedBy: isWalkin ? `Walk-in ${plate}` : name,
+      reservationType: isWalkin ? 'Kiosk' : 'Website'
+    });
+    console.log(`✅ Slot ${slot} marked as Reserved`);
+
+    // Create Xendit invoice URLs
     const successUrl = isWalkin
       ? `https://intellipark-kiosk.web.app/payment-success.html?slot=${slot}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}`
       : `https://intellipark2025-327e9.web.app/confirmation.html?slot=${slot}&name=${encodeURIComponent(name)}&plate=${encodeURIComponent(plate)}&vehicle=${vehicle}&time=${time}&timestamp=${encodeURIComponent(timestamp)}&email=${encodeURIComponent(email)}`;
@@ -144,6 +159,7 @@ app.post("/api/create-invoice", async (req, res) => {
       ? `https://intellipark-kiosk.web.app/payment-failed.html`
       : `https://intellipark2025-327e9.web.app/payment-failed.html?slot=${slot}`;
 
+    // Create Xendit invoice
     const xenditPayload = {
       external_id: externalId,
       amount: 50,
@@ -152,7 +168,7 @@ app.post("/api/create-invoice", async (req, res) => {
       payer_email: email,
       success_redirect_url: successUrl,
       failure_redirect_url: failureUrl,
-      invoice_duration: 1800 // 30 minutes to pay
+      invoice_duration: 1800
     };
 
     console.log("📤 Sending to Xendit:", JSON.stringify(xenditPayload, null, 2));
@@ -173,12 +189,10 @@ app.post("/api/create-invoice", async (req, res) => {
       console.error("❌ Xendit error:", invoice);
       pendingReservations.delete(externalId);
       
-      // Rollback reservation if invoice creation fails
-      if (!isWalkin) {
-        await db.ref(`/reservations/${slot}`).remove();
-        await db.ref(`/${slot}`).update({ status: 'Available', reserved: false });
-        console.log(`🔄 Rolled back reservation for ${slot}`);
-      }
+      // Rollback reservation
+      await db.ref(`/reservations/${slot}`).remove();
+      await db.ref(`/${slot}`).update({ status: 'Available', reserved: false });
+      console.log(`🔄 Rolled back reservation for ${slot}`);
       
       return res.status(400).json({ error: "Xendit API error", details: invoice.message || invoice.error_code });
     }
