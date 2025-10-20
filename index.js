@@ -63,25 +63,47 @@ app.post("/api/create-invoice", async (req, res) => {
     }
 
     // ✅ Check if slot is available
+    // ✅ UPDATED: Different availability logic for walk-ins vs website bookings
     const slotSnapshot = await db.ref(`/${slot}/status`).once('value');
     const slotStatus = slotSnapshot.val();
-    
-    if (slotStatus !== 'Available') {
-      console.log(`❌ Slot ${slot} is ${slotStatus}, not available`);
-      return res.status(400).json({ error: `Slot ${slot} is no longer available` });
+
+    // For website bookings, slot must be Available
+    if (!isWalkin && slotStatus !== 'Available') {
+      console.log(`❌ Slot ${slot} is ${slotStatus}, not available for website booking`);
+      return res.status(400).json({ 
+        error: `Slot ${slot} is no longer available` 
+      });
     }
 
-    const timestamp = new Date().toISOString();
-    const externalId = isWalkin ? `WALKIN_${slot}_${Date.now()}` : `WEBSITE_${slot}_${Date.now()}`;
-    
-    console.log(`✅ Validation passed. Creating invoice for ${email}, slot ${slot}`);
-
-    const pendingData = isWalkin 
-      ? { slot, email, plate, vehicle, timestamp, type: 'walk-in' }
-      : { slot, name, email, plate, vehicle, time, timestamp, type: 'website-booking' };
-
-    pendingReservations.set(externalId, pendingData);
-    console.log(`💾 Stored pending ${isWalkin ? 'walk-in' : 'website booking'}: ${externalId}`);
+    // For walk-ins, allow if Available OR if Reserved but payment is pending/expired
+    if (isWalkin) {
+      if (slotStatus === 'Occupied') {
+        console.log(`❌ Slot ${slot} is Occupied, cannot be used`);
+        return res.status(400).json({ 
+          error: `Slot ${slot} is currently occupied` 
+        });
+      }
+      
+      // If Reserved, check if there's an existing reservation
+      if (slotStatus === 'Reserved') {
+        const existingReservation = await db.ref(`/reservations/${slot}`).once('value');
+        const reservation = existingReservation.val();
+        
+        // Allow walk-in to override if existing reservation is Pending (not yet paid)
+        if (reservation && reservation.status === 'Pending') {
+          console.log(`⚠️ Overriding pending reservation for ${slot} with walk-in`);
+          // Remove the old pending reservation
+          await db.ref(`/reservations/${slot}`).remove();
+        } else if (reservation && reservation.status === 'Paid') {
+          console.log(`❌ Slot ${slot} has a paid reservation`);
+          return res.status(400).json({ 
+            error: `Slot ${slot} is already reserved and paid` 
+          });
+        }
+      }
+      
+      console.log(`✅ Slot ${slot} is available for walk-in`);
+    }
 
     // ✅ CREATE INITIAL RESERVATION IN FIREBASE (Status: Pending)
     if (!isWalkin) {
