@@ -289,16 +289,47 @@ app.post("/api/xendit-webhook", async (req, res) => {
 });
 
 // ✅ Exit endpoint (called by exit kiosk)
+// ✅ UPDATED: Exit endpoint with ticket validation
 app.post("/api/exit", async (req, res) => {
   try {
-    const { slot, plate, exitTime } = req.body;
+    const { slot, plate, exitTime, ticketId } = req.body; // ✅ Added ticketId
     
-    console.log(`🚪 Exit request - Slot: ${slot}, Plate: ${plate}`);
+    console.log(`🚪 Exit request - Slot: ${slot}, Plate: ${plate}, Ticket: ${ticketId || 'N/A'}`);
 
     if (!slot || !plate) {
       return res.status(400).json({ error: "Missing slot or plate" });
     }
 
+    // ✅ Verify ticket if provided (from QR code exit)
+    if (ticketId) {
+      const ticketSnapshot = await db.ref(`/tickets/${ticketId}`).once('value');
+      
+      if (!ticketSnapshot.exists()) {
+        console.error("❌ Invalid ticket");
+        return res.status(404).json({ error: "Invalid ticket" });
+      }
+
+      const ticketData = ticketSnapshot.val();
+      
+      if (ticketData.used) {
+        console.error("❌ Ticket already used");
+        return res.status(403).json({ error: "Ticket already used" });
+      }
+
+      if (!ticketData.entryVerified) {
+        console.error("❌ Not checked in at entrance");
+        return res.status(403).json({ error: "Please check in at entrance first" });
+      }
+
+      if (ticketData.slot !== slot || ticketData.plate !== plate) {
+        console.error("❌ Ticket data mismatch");
+        return res.status(403).json({ error: "Ticket data mismatch" });
+      }
+
+      console.log('✅ Ticket validated:', ticketId);
+    }
+
+    // Verify reservation exists
     const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
     
     if (!reservationSnapshot.exists()) {
@@ -315,16 +346,28 @@ app.post("/api/exit", async (req, res) => {
 
     const exitTimestamp = exitTime || new Date().toISOString();
     
+    // Update reservation with exit time
     await db.ref(`/reservations/${slot}`).update({
       exitTime: exitTimestamp,
       status: "Completed"
     });
 
+    // Free the slot
     await db.ref(`/${slot}`).update({
       status: "Available",
       reserved: false
     });
 
+    // ✅ Mark ticket as used in Firebase (if provided)
+    if (ticketId) {
+      await db.ref(`/tickets/${ticketId}`).update({
+        used: true,
+        usedAt: exitTimestamp
+      });
+      console.log(`✅ Ticket marked as used: ${ticketId}`);
+    }
+
+    // Calculate duration
     const entryTime = new Date(reservation.timestamp);
     const exitTimeDate = new Date(exitTimestamp);
     const durationMs = exitTimeDate - entryTime;
@@ -348,65 +391,6 @@ app.post("/api/exit", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-app.post("/api/record-exit", async (req, res) => {
-  try {
-    const { slot, plate } = req.body;
-    
-    console.log(`🚪 Exit request for slot: ${slot}, plate: ${plate}`);
-
-    if (!slot) return res.status(400).json({ error: "Missing slot parameter" });
-    if (!plate) return res.status(400).json({ error: "Missing plate parameter" });
-
-    const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
-    
-    if (!reservationSnapshot.exists()) {
-      console.log(`❌ No reservation found for slot: ${slot}`);
-      return res.status(404).json({ error: "No reservation found for this slot" });
-    }
-
-    const reservation = reservationSnapshot.val();
-
-    if (reservation.plate !== plate) {
-      console.log(`❌ Plate mismatch: Expected ${reservation.plate}, got ${plate}`);
-      return res.status(403).json({ error: "Plate number does not match reservation" });
-    }
-
-    const exitTime = new Date().toISOString();
-    
-    await db.ref(`/reservations/${slot}`).update({
-      exitTime: exitTime,
-      status: "Completed"
-    });
-
-    await db.ref(`/${slot}`).update({
-      status: "Available",
-      reserved: false
-    });
-
-    const entryTime = new Date(reservation.timestamp);
-    const exitTimeDate = new Date(exitTime);
-    const durationMs = exitTimeDate - entryTime;
-    const durationMins = Math.floor(durationMs / 60000);
-    const hours = Math.floor(durationMins / 60);
-    const mins = durationMins % 60;
-
-    console.log(`✅ Exit recorded for ${slot} - Duration: ${hours}h ${mins}m`);
-
-    res.json({
-      success: true,
-      message: "Exit recorded successfully",
-      exitTime: exitTime,
-      duration: `${hours}h ${mins}m`,
-      entryTime: reservation.timestamp
-    });
-
-  } catch (error) {
-    console.error("❌ Error recording exit:", error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.post("/api/verify-exit", async (req, res) => {
   try {
     const { plate } = req.body;
