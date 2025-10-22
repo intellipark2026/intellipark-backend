@@ -291,6 +291,7 @@ app.post("/api/xendit-webhook", async (req, res) => {
 // ✅ Exit endpoint (called by exit kiosk)
 // ✅ UPDATED: Exit endpoint with ticket validation
 // ✅ FIXED: Exit endpoint with proper walk-in vs reservation handling
+// ✅ FIXED: Exit endpoint with proper walk-in vs reservation handling
 app.post("/api/exit", async (req, res) => {
   try {
     const { slot, plate, exitTime, ticketId } = req.body;
