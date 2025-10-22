@@ -290,9 +290,10 @@ app.post("/api/xendit-webhook", async (req, res) => {
 
 // ✅ Exit endpoint (called by exit kiosk)
 // ✅ UPDATED: Exit endpoint with ticket validation
+// ✅ FIXED: Exit endpoint with proper walk-in vs reservation handling
 app.post("/api/exit", async (req, res) => {
   try {
-    const { slot, plate, exitTime, ticketId } = req.body; // ✅ Added ticketId
+    const { slot, plate, exitTime, ticketId } = req.body;
     
     console.log(`🚪 Exit request - Slot: ${slot}, Plate: ${plate}, Ticket: ${ticketId || 'N/A'}`);
 
@@ -310,15 +311,49 @@ app.post("/api/exit", async (req, res) => {
       }
 
       const ticketData = ticketSnapshot.val();
+      console.log('📦 Ticket data:', JSON.stringify(ticketData));
       
       if (ticketData.used) {
         console.error("❌ Ticket already used");
         return res.status(403).json({ error: "Ticket already used" });
       }
 
-      if (!ticketData.entryVerified) {
-        console.error("❌ Not checked in at entrance");
-        return res.status(403).json({ error: "Please check in at entrance first" });
+      // ✅ CRITICAL FIX: Check ticket type before validating entryVerified
+      const ticketType = ticketData.type;
+      console.log(`🎫 Ticket type: ${ticketType}`);
+
+      if (ticketType === 'walkin') {
+        // ✅ Walk-in tickets: ONLY check payment status
+        console.log('💰 Walk-in ticket - checking payment status...');
+        if (ticketData.status !== 'Paid') {
+          console.error("❌ Walk-in ticket not paid");
+          return res.status(403).json({ error: "Payment required" });
+        }
+        console.log('✅ Walk-in payment verified - gate can open');
+      } else if (ticketType === 'reservation') {
+        // ✅ Reservation tickets: Check entrance verification
+        console.log('🚪 Reservation ticket - checking entrance verification...');
+        if (!ticketData.entryVerified) {
+          console.error("❌ Reservation not checked in at entrance");
+          return res.status(403).json({ error: "Please check in at entrance first" });
+        }
+        console.log('✅ Reservation entry verified - gate can open');
+      } else {
+        // ✅ Fallback: Smart detection for tickets without type
+        console.log('⚠️ No ticket type - using smart detection...');
+        
+        // If paid and no entryVerified = walk-in
+        if (ticketData.status === 'Paid' && !ticketData.entryVerified) {
+          console.log('✅ Detected as walk-in (paid, no entry check)');
+        } 
+        // If entryVerified = reservation
+        else if (ticketData.entryVerified) {
+          console.log('✅ Detected as reservation (entry verified)');
+        } 
+        else {
+          console.error("❌ Ticket not verified");
+          return res.status(403).json({ error: "Ticket not verified" });
+        }
       }
 
       if (ticketData.slot !== slot || ticketData.plate !== plate) {
