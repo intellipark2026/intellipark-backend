@@ -1,4 +1,4 @@
-// Updated: 2025-10-20 - Added initial reservation creation for website bookings
+// Updated: 2025-10-22 - Added dynamic pricing for Motorcycle (₱30) and Car (₱50)
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -35,29 +35,40 @@ app.get("/", (req, res) => {
   res.send("✅ IntelliPark backend running");
 });
 
-// ✅ UPDATED: Now creates initial reservation in Firebase
+// ✅ UPDATED: Now accepts dynamic amount based on vehicle type
 app.post("/api/create-invoice", async (req, res) => {
   try {
     console.log("📥 Received request body:", JSON.stringify(req.body, null, 2));
     
-    const { name, email, plate, vehicle, time, slot, type } = req.body;
+    const { name, email, plate, vehicle, time, slot, type, amount } = req.body;
     const isWalkin = type === 'walk-in';
     
     console.log(`📋 Request type: ${isWalkin ? 'WALK-IN' : 'WEBSITE BOOKING'}`);
+    console.log(`🚗 Vehicle: ${vehicle}, Amount: ₱${amount}`);
 
     // Validation
     if (!slot) return res.status(400).json({ error: "Missing slot parameter" });
     if (!email) return res.status(400).json({ error: "Missing email parameter" });
     if (!plate) return res.status(400).json({ error: "Missing plate parameter" });
     if (!vehicle) return res.status(400).json({ error: "Missing vehicle parameter" });
+    if (!amount) return res.status(400).json({ error: "Missing amount parameter" });
     if (!isWalkin && !time) return res.status(400).json({ error: "Missing time parameter" });
     if (!isWalkin && !name) return res.status(400).json({ error: "Missing name parameter" });
 
+    // ✅ Validate amount based on vehicle type
+    const expectedAmount = vehicle === 'Motorcycle' ? 30 : 50;
+    if (amount !== expectedAmount) {
+      console.log(`⚠️ Amount mismatch: Expected ₱${expectedAmount} for ${vehicle}, got ₱${amount}`);
+      return res.status(400).json({ error: `Invalid amount for ${vehicle}. Expected ₱${expectedAmount}` });
+    }
+
+    // Email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: "Invalid email format" });
     }
 
+    // Plate validation
     const plateRegex = /^[A-Za-z]{3}[0-9]{3}$/;
     if (!plateRegex.test(plate)) {
       return res.status(400).json({ error: "Plate number must be in format ABC123 (3 letters + 3 digits)" });
@@ -94,29 +105,29 @@ app.post("/api/create-invoice", async (req, res) => {
     
     console.log(`✅ Slot ${slot} is available for ${isWalkin ? 'walk-in' : 'booking'}`);
 
-    // ✅ CRITICAL: Define timestamp and externalId EARLY
     const timestamp = new Date().toISOString();
     const externalId = isWalkin ? `WALKIN_${slot}_${Date.now()}` : `WEBSITE_${slot}_${Date.now()}`;
     
     console.log(`✅ Validation passed. Creating invoice for ${email}, slot ${slot}`);
     console.log(`📝 External ID: ${externalId}`);
+    console.log(`💰 Amount: ₱${amount} (${vehicle})`);
 
     // Store in memory
     const pendingData = isWalkin 
-      ? { slot, email, plate, vehicle, timestamp, type: 'walk-in' }
-      : { slot, name, email, plate, vehicle, time, timestamp, type: 'website-booking' };
+      ? { slot, email, plate, vehicle, amount, timestamp, type: 'walk-in' }
+      : { slot, name, email, plate, vehicle, amount, time, timestamp, type: 'website-booking' };
 
     pendingReservations.set(externalId, pendingData);
     console.log(`💾 Stored pending ${isWalkin ? 'walk-in' : 'website booking'}: ${externalId}`);
 
-    // ✅ CREATE INITIAL RESERVATION IN FIREBASE
+    // ✅ CREATE INITIAL RESERVATION IN FIREBASE WITH DYNAMIC AMOUNT
     const initialReservation = isWalkin ? {
       email: email,
       plate: plate,
       vehicle: vehicle,
       slot: slot,
       status: 'Pending',
-      amount: 50,
+      amount: amount,
       timestamp: timestamp,
       reservedVia: 'Kiosk',
       exitTime: null,
@@ -129,7 +140,7 @@ app.post("/api/create-invoice", async (req, res) => {
       vehicle: vehicle,
       slot: slot,
       status: 'Pending',
-      amount: 50,
+      amount: amount,
       timestamp: timestamp,
       reservedVia: 'Website',
       exitTime: null,
@@ -139,14 +150,15 @@ app.post("/api/create-invoice", async (req, res) => {
     };
 
     await db.ref(`/reservations/${slot}`).set(initialReservation);
-    console.log(`✅ Initial reservation created in Firebase: ${slot} (Status: Pending)`);
+    console.log(`✅ Initial reservation created in Firebase: ${slot} (Amount: ₱${amount})`);
 
     // Update slot status
     await db.ref(`/${slot}`).update({ 
       status: 'Reserved', 
       reserved: true,
       reservedBy: isWalkin ? `Walk-in ${plate}` : name,
-      reservationType: isWalkin ? 'Kiosk' : 'Website'
+      reservationType: isWalkin ? 'Kiosk' : 'Website',
+      vehicleType: vehicle
     });
     console.log(`✅ Slot ${slot} marked as Reserved`);
 
@@ -159,12 +171,14 @@ app.post("/api/create-invoice", async (req, res) => {
       ? `https://intellipark-kiosk.web.app/payment-failed.html`
       : `https://intellipark2025-327e9.web.app/payment-failed.html?slot=${slot}`;
 
-    // Create Xendit invoice
+    // ✅ Create Xendit invoice with dynamic amount
     const xenditPayload = {
       external_id: externalId,
-      amount: 50,
+      amount: amount,
       currency: "PHP",
-      description: isWalkin ? `Walk-in Parking - ${slot}` : `Website Reservation - ${slot}`,
+      description: isWalkin 
+        ? `Walk-in Parking (${vehicle}) - ${slot}` 
+        : `Website Reservation (${vehicle}) - ${slot}`,
       payer_email: email,
       success_redirect_url: successUrl,
       failure_redirect_url: failureUrl,
@@ -203,6 +217,8 @@ app.post("/api/create-invoice", async (req, res) => {
       success: true,
       invoiceUrl: invoice.invoice_url,
       externalId: externalId,
+      amount: amount,
+      vehicle: vehicle,
       invoice: invoice
     });
 
@@ -225,7 +241,7 @@ app.post("/api/xendit-webhook", async (req, res) => {
       
       if (!reservationData) {
         console.error("❌ No pending reservation found for:", externalId);
-        return res.sendStatus(200); // Still return 200 to Xendit
+        return res.sendStatus(200);
       }
 
       const { slot, email, plate, vehicle, timestamp, type } = reservationData;
@@ -236,7 +252,6 @@ app.post("/api/xendit-webhook", async (req, res) => {
       console.log(`📍 Processing payment for slot: ${slot} (${type})`);
       console.log("👤 Customer details:", { email, plate, vehicle });
 
-      // ✅ UPDATE existing reservation with payment confirmation
       await db.ref(`/reservations/${slot}`).update({
         status: "Paid",
         amount: amount,
@@ -257,7 +272,6 @@ app.post("/api/xendit-webhook", async (req, res) => {
       console.log(`✅ Payment processed successfully for ${externalId}`);
     }
 
-    // ✅ Handle payment expiry/failure
     if (event.status === "EXPIRED" || event.status === "FAILED") {
       const externalId = event.external_id;
       const reservationData = pendingReservations.get(externalId);
@@ -265,7 +279,6 @@ app.post("/api/xendit-webhook", async (req, res) => {
       if (reservationData && !reservationData.type.includes('walk-in')) {
         const { slot } = reservationData;
         
-        // Release the slot
         await db.ref(`/reservations/${slot}`).update({
           status: "Cancelled",
           cancelReason: event.status === "EXPIRED" ? "Payment timeout" : "Payment failed"
@@ -289,9 +302,6 @@ app.post("/api/xendit-webhook", async (req, res) => {
 });
 
 // ✅ Exit endpoint (called by exit kiosk)
-// ✅ UPDATED: Exit endpoint with ticket validation
-// ✅ FIXED: Exit endpoint with proper walk-in vs reservation handling
-// ✅ FIXED: Exit endpoint with proper walk-in vs reservation handling
 app.post("/api/exit", async (req, res) => {
   try {
     const { slot, plate, exitTime, ticketId } = req.body;
@@ -319,12 +329,10 @@ app.post("/api/exit", async (req, res) => {
         return res.status(403).json({ error: "Ticket already used" });
       }
 
-      // ✅ CRITICAL FIX: Check ticket type before validating entryVerified
       const ticketType = ticketData.type;
       console.log(`🎫 Ticket type: ${ticketType}`);
 
       if (ticketType === 'walkin') {
-        // ✅ Walk-in tickets: ONLY check payment status
         console.log('💰 Walk-in ticket - checking payment status...');
         if (ticketData.status !== 'Paid') {
           console.error("❌ Walk-in ticket not paid");
@@ -332,7 +340,6 @@ app.post("/api/exit", async (req, res) => {
         }
         console.log('✅ Walk-in payment verified - gate can open');
       } else if (ticketType === 'reservation') {
-        // ✅ Reservation tickets: Check entrance verification
         console.log('🚪 Reservation ticket - checking entrance verification...');
         if (!ticketData.entryVerified) {
           console.error("❌ Reservation not checked in at entrance");
@@ -340,14 +347,11 @@ app.post("/api/exit", async (req, res) => {
         }
         console.log('✅ Reservation entry verified - gate can open');
       } else {
-        // ✅ Fallback: Smart detection for tickets without type
         console.log('⚠️ No ticket type - using smart detection...');
         
-        // If paid and no entryVerified = walk-in
         if (ticketData.status === 'Paid' && !ticketData.entryVerified) {
           console.log('✅ Detected as walk-in (paid, no entry check)');
         } 
-        // If entryVerified = reservation
         else if (ticketData.entryVerified) {
           console.log('✅ Detected as reservation (entry verified)');
         } 
@@ -427,6 +431,7 @@ app.post("/api/exit", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 app.post("/api/verify-exit", async (req, res) => {
   try {
     const { plate } = req.body;
