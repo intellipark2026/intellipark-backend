@@ -1,4 +1,4 @@
-// Updated: 2025-10-22 - Added dynamic pricing for Motorcycle (₱30) and Car (₱50)
+// Updated: 2025-10-28 - Fixed plate number storage issue + supports 10 slots with zero-padding
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -152,15 +152,23 @@ app.post("/api/create-invoice", async (req, res) => {
     await db.ref(`/reservations/${slot}`).set(initialReservation);
     console.log(`✅ Initial reservation created in Firebase: ${slot} (Amount: ₱${amount})`);
 
-    // Update slot status
+    // ✅ FIXED: Update slot status with COMPLETE data (including plate, email, time)
     await db.ref(`/${slot}`).update({ 
       status: 'Reserved', 
       reserved: true,
       reservedBy: isWalkin ? `Walk-in ${plate}` : name,
       reservationType: isWalkin ? 'Kiosk' : 'Website',
-      vehicleType: vehicle
+      vehicleType: vehicle,
+      // ✅ ADDED: Store all booking details in slot object
+      name: isWalkin ? `Walk-in ${plate}` : name,
+      email: email,
+      plate: plate,
+      vehicle: vehicle,
+      time: time || null,
+      bookedAt: timestamp,
+      amount: amount
     });
-    console.log(`✅ Slot ${slot} marked as Reserved`);
+    console.log(`✅ Slot ${slot} marked as Reserved with complete booking data`);
 
     // Create Xendit invoice URLs
     const successUrl = isWalkin
@@ -205,7 +213,16 @@ app.post("/api/create-invoice", async (req, res) => {
       
       // Rollback reservation
       await db.ref(`/reservations/${slot}`).remove();
-      await db.ref(`/${slot}`).update({ status: 'Available', reserved: false });
+      await db.ref(`/${slot}`).update({ 
+        status: 'Available', 
+        reserved: false,
+        name: "",
+        email: "",
+        plate: "",
+        vehicle: "",
+        time: "",
+        bookedAt: ""
+      });
       console.log(`🔄 Rolled back reservation for ${slot}`);
       
       return res.status(400).json({ error: "Xendit API error", details: invoice.message || invoice.error_code });
@@ -286,7 +303,13 @@ app.post("/api/xendit-webhook", async (req, res) => {
         
         await db.ref(`/${slot}`).update({ 
           status: "Available", 
-          reserved: false 
+          reserved: false,
+          name: "",
+          email: "",
+          plate: "",
+          vehicle: "",
+          time: "",
+          bookedAt: ""
         });
         
         console.log(`🔄 Released slot ${slot} due to ${event.status}`);
@@ -395,7 +418,13 @@ app.post("/api/exit", async (req, res) => {
     // Free the slot
     await db.ref(`/${slot}`).update({
       status: "Available",
-      reserved: false
+      reserved: false,
+      name: "",
+      email: "",
+      plate: "",
+      vehicle: "",
+      time: "",
+      bookedAt: ""
     });
 
     // ✅ Mark ticket as used in Firebase (if provided)
