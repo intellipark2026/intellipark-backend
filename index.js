@@ -347,10 +347,11 @@ app.post("/api/exit", async (req, res) => {
       const ticketData = ticketSnapshot.val();
       console.log('📦 Ticket data:', JSON.stringify(ticketData));
       
-      if (ticketData.used) {
-        console.error("❌ Ticket already used");
-        return res.status(403).json({ error: "Ticket already used" });
+      if (ticketData.exitVerified) {
+        console.error("❌ Ticket already used for exit");
+        return res.status(403).json({ error: "Ticket already used for exit" });
       }
+
 
       const ticketType = ticketData.type;
       console.log(`🎫 Ticket type: ${ticketType}`);
@@ -461,79 +462,144 @@ app.post("/api/exit", async (req, res) => {
   }
 });
 
-app.post("/api/verify-exit", async (req, res) => {
+app.post("/api/exit", async (req, res) => {
   try {
-    const { plate } = req.body;
+    const { slot, plate, exitTime, ticketId } = req.body;
     
-    console.log(`🔍 Verifying exit for plate: ${plate}`);
+    console.log(`🚪 Exit request - Slot: ${slot}, Plate: ${plate}, Ticket: ${ticketId || 'N/A'}`);
 
-    if (!plate) {
-      return res.status(400).json({ error: "Missing plate parameter" });
+    if (!slot || !plate) {
+      return res.status(400).json({ error: "Missing slot or plate" });
     }
 
-    const reservationsSnapshot = await db.ref('/reservations').once('value');
-    const reservations = reservationsSnapshot.val();
-
-    if (!reservations) {
-      return res.status(404).json({ error: "No active reservations found" });
-    }
-
-    let matchingSlot = null;
-    let matchingReservation = null;
-
-    for (const [slot, reservation] of Object.entries(reservations)) {
-      if (reservation.plate === plate && reservation.status === "Paid") {
-        matchingSlot = slot;
-        matchingReservation = reservation;
-        break;
+    // ✅ Verify ticket if provided (from QR code exit)
+    if (ticketId) {
+      const ticketSnapshot = await db.ref(`/tickets/${ticketId}`).once('value');
+      
+      if (!ticketSnapshot.exists()) {
+        console.error("❌ Invalid ticket");
+        return res.status(404).json({ error: "Invalid ticket" });
       }
+
+      const ticketData = ticketSnapshot.val();
+      console.log('📦 Ticket data:', JSON.stringify(ticketData));
+      
+      // ✅ BLOCK ONLY IF ALREADY EXITED
+      if (ticketData.exitVerified) {
+        console.error("❌ Ticket already used for exit");
+        return res.status(403).json({ error: "Ticket already used for exit" });
+      }
+
+      const ticketType = ticketData.type;
+      console.log(`🎫 Ticket type: ${ticketType}`);
+
+      if (ticketType === 'walkin') {
+        console.log('💰 Walk-in ticket - checking payment status...');
+        if (ticketData.status !== 'Paid') {
+          console.error("❌ Walk-in ticket not paid");
+          return res.status(403).json({ error: "Payment required" });
+        }
+        console.log('✅ Walk-in payment verified - gate can open');
+      } else if (ticketType === 'reservation') {
+        console.log('🚪 Reservation ticket - checking entrance verification...');
+        if (!ticketData.entryVerified) {
+          console.error("❌ Reservation not checked in at entrance");
+          return res.status(403).json({ error: "Please check in at entrance first" });
+        }
+        console.log('✅ Reservation entry verified - gate can open');
+      } else {
+        console.log('⚠️ No ticket type - using smart detection...');
+        
+        if (ticketData.status === 'Paid' && !ticketData.entryVerified) {
+          console.log('✅ Detected as walk-in (paid, no entry check)');
+        } 
+        else if (ticketData.entryVerified) {
+          console.log('✅ Detected as reservation (entry verified)');
+        } 
+        else {
+          console.error("❌ Ticket not verified");
+          return res.status(403).json({ error: "Ticket not verified" });
+        }
+      }
+
+      if (ticketData.slot !== slot || ticketData.plate !== plate) {
+        console.error("❌ Ticket data mismatch");
+        return res.status(403).json({ error: "Ticket data mismatch" });
+      }
+
+      console.log('✅ Ticket validated:', ticketId);
     }
 
-    if (!matchingSlot) {
-      return res.status(404).json({ error: "No active reservation found for this plate number" });
+    // Verify reservation exists
+    const reservationSnapshot = await db.ref(`/reservations/${slot}`).once('value');
+    
+    if (!reservationSnapshot.exists()) {
+      console.log(`❌ No reservation for slot: ${slot}`);
+      return res.status(404).json({ error: "No reservation found" });
     }
 
-    console.log(`✅ Found reservation: ${matchingSlot} for plate ${plate}`);
+    const reservation = reservationSnapshot.val();
+
+    if (reservation.plate !== plate) {
+      console.log(`❌ Plate mismatch: Expected ${reservation.plate}, got ${plate}`);
+      return res.status(403).json({ error: "Plate mismatch" });
+    }
+
+    const exitTimestamp = exitTime || new Date().toISOString();
+    
+    // Update reservation with exit time
+    await db.ref(`/reservations/${slot}`).update({
+      exitTime: exitTimestamp,
+      status: "Completed"
+    });
+
+    // Free the slot
+    await db.ref(`/${slot}`).update({
+      status: "Available",
+      reserved: false,
+      name: "",
+      email: "",
+      plate: "",
+      vehicle: "",
+      time: "",
+      bookedAt: ""
+    });
+
+    // ✅ Mark ticket as exited in Firebase (if provided)
+    if (ticketId) {
+      await db.ref(`/tickets/${ticketId}`).update({
+        used: true,
+        usedAt: exitTimestamp,
+        exitVerified: true,    // <-- the new correct flag
+        exitTime: exitTimestamp
+      });
+      console.log(`✅ Ticket marked as exited: ${ticketId}`);
+    }
+
+    // Calculate duration
+    const entryTime = new Date(reservation.timestamp);
+    const exitTimeDate = new Date(exitTimestamp);
+    const durationMs = exitTimeDate - entryTime;
+    const durationMins = Math.floor(durationMs / 60000);
+    const hours = Math.floor(durationMins / 60);
+    const mins = durationMins % 60;
+
+    console.log(`✅ Exit recorded - ${slot} - Duration: ${hours}h ${mins}m`);
 
     res.json({
       success: true,
-      slot: matchingSlot,
-      reservation: matchingReservation,
-      message: "Reservation verified"
+      message: "Gate opened",
+      exitTime: exitTimestamp,
+      duration: `${hours}h ${mins}m`,
+      slot: slot,
+      plate: plate
     });
 
   } catch (error) {
-    console.error("❌ Error verifying exit:", error.message);
+    console.error("❌ Exit error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
-
-app.get("/api/booking/:externalId", async (req, res) => {
-  try {
-    const { externalId } = req.params;
-    
-    console.log(`🔍 Checking booking status for: ${externalId}`);
-
-    const isWalkin = externalId.includes('WALKIN');
-    const path = isWalkin ? `/walk-in-bookings/${externalId}` : `/reservations/${externalId}`;
-
-    const snapshot = await db.ref(path).once('value');
-    const booking = snapshot.val();
-
-    if (!booking) {
-      console.log(`❌ Booking not found: ${externalId}`);
-      return res.status(404).json({ error: 'Booking not found' });
-    }
-
-    console.log(`✅ Booking found: ${externalId}`);
-    res.json({ success: true, booking: booking });
-
-  } catch (error) {
-    console.error('❌ Error fetching booking:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`✅ IntelliPark backend running on port ${PORT}`);
