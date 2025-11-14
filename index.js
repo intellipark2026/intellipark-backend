@@ -69,10 +69,23 @@ app.post("/api/create-invoice", async (req, res) => {
     }
 
     // Plate validation
-    const plateRegex = /^[A-Za-z]{3}[0-9]{3}$/;
-    if (!plateRegex.test(plate)) {
-      return res.status(400).json({ error: "Plate number must be in format ABC123 (3 letters + 3 digits)" });
+    // Updated regex patterns
+    const motorcyclePlateRegex = /^[0-9]{3}[A-Z]{3}$/;
+    const carPlateRegex = /^[A-Z]{3}[0-9]{4}$/;
+
+    if (vehicle === 'Motorcycle') {
+      if (!motorcyclePlateRegex.test(plate)) {
+        return res.status(400).json({ error: "Motorcycle plate must be in format 123ABC (3 digits followed by 3 letters)" });
+      }
+    } else if (vehicle === 'Car') {
+      if (!carPlateRegex.test(plate)) {
+        return res.status(400).json({ error: "Car plate must be in format ABC1234 (3 letters followed by 4 digits)" });
+      }
+    } else {
+      // Optional fallback for other vehicle types
+      return res.status(400).json({ error: "Unsupported vehicle type" });
     }
+
 
     // Check slot availability
     const slotSnapshot = await db.ref(`/${slot}/status`).once('value');
